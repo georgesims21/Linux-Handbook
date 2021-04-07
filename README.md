@@ -336,6 +336,54 @@ Can be a pain, needs to be run with these commands as well as using the nvidia-m
 Also need to bypass another mount limitation (https://github.com/moby/moby/issues/16233). Final run command should look like:
 ```docker run -it --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined procdfs:0.1.0```.   
 
+##### Docker Network
+Docker creates its own isolated container network for the containers. This means that containers which are running inside the same network can simply reach one and other by the container name, rather than the classic ip and port route.
+```bash
+docker network ls # list all networks, some already pre-configured
+```
+
+###### Create a network
+Different docker networks should be created for containers which make up a single application.
+```bash
+docker network create network-name # create new network called network-name
+```
+This newly created network must be passed when starting a container.
+```bash
+docker run -d -p hostport:containerport --net network-name
+```
+Then to do any commands over the network, simply use user@name-of-container rather than user@<ip>.   
+For integrated containers, for example MongoDB has two containers, one for the actual database and the other for accessing it as a web application. Using the docker network and setting certain environment variables (things like username and port of the database) they can connect to eachother. The instructions for these things are found on the docker container image page, where a list of all needed environment variables are.
+
+###### Docker compose
+This is used to orchestrate running containers at the same time rather than running individually on the command line.
+```
+# some-compose-file.yaml
+
+version:'3' # docker version
+services: # where container list goes
+    container1-name: # --name command from cli
+        image: # name of the image (local or dockerhub)
+
+        ports: # -p
+            - HOST:CONTAINER
+
+        environment: # -e
+            - ENV_VAR_1=val1
+
+    container2-name:
+        image:
+        ...
+    container3-name:
+        ...
+```
+A network is not needed to be manually created, docker does this automatically and puts all services/containers from within the compose file together in their own network.
+
+The compose file must then be built and run using:
+```bash
+docker-compose -f some-compose-file.yaml up # start all containers from this compose file
+docker-compose -f some-compose-file.yaml down # stop all containers from this compose file, also removes network
+```
+
 ### Kubernetes
 
 #### Node
@@ -371,6 +419,20 @@ For a K8s worker node to run, it needs 3 things installed:
 * kubeproxy   
     Forwards requests from services to pods. It also makes sure communications have the lowest overhead possible, for instance forcing a container to fetch db data located on the same node rather than over the (K8s) network.
   
+The K8s heirarchy looks like this:
+```
+* Deployment
+  manages a ...
+* ReplicaSet                         -
+  manages a ...                       |
+* Pod                                 |- Managed by K8s
+  which is an abstraction over a ...  |
+* Container                          -
+```
+
+##### ReplicaSet
+Manages a pod's replicas, and usually handled by K8s. The user should only be interacting with the deployment.
+
 #### Cluster interaction
 
 ##### Master Nodes
@@ -406,61 +468,220 @@ minikube status # get current status
 Used to interact with the minikube (or regular) cluster.
 
 ##### Commands
+
+###### Creating/Deleting
 ```bash
 kubectl create deployment <name> --image=<container-name>
+kubectl delete deployment <name> # delete a deployment
+kubectl delete -f <config-file-name> # delete a deployment linked to a specific config file
+```
+
+###### Querying
+```bash
+kubectl get all # list everything
 kubectl get services # list all current services
 kubectl get nodes # list all current nodes
 kubectl get deployment # list all current deployments
+kubectl get deployment -o yaml # output in yaml format
 kubectl get pod # list all pods
+kubectl get pod -o wide # get extended (wide) info about pods like IP addr etc
+kubectl describe pod <pod-name> # shows all state changes for that pod
+kubectl describe service <service-name> # get service info (like ports etc)
 ```
 
-##### Docker Network
-Docker creates its own isolated container network for the containers. This means that containers which are running inside the same network can simply reach one and other by the container name, rather than the classic ip and port route.   
+###### Debugging
 ```bash
-docker network ls # list all networks, some already pre-configured
+kubectl logs <pod-name> # output logs for that pod
+kubectl exec -it <pod-name> -- bin/bash # start interactive terminal (-it) in that container
 ```
 
-###### Create a network
-Different docker networks should be created for containers which make up a single application.
+###### Config
 ```bash
-docker network create network-name # create new network called network-name
+kubectl edit deployment <deployment-name> # create a config for an already running deployment and edit it. Changes will cause a new pod to replace the old one with the changes
+kubectl apply -f <config-file-name> # exists: update with new config, not-exist: creates new deployment with this config file
 ```
-This newly created network must be passed when starting a container.
+
+#### Configuration
+Each configuration contains 3 parts:
+* Metadata
+  - Containing metadata like name and version etc.
+    ```yaml
+    metadata:
+      name: example
+      labels: ...
+      ...
+    ```
+
+* Specification
+  - Lists all of the specifications of the deployment/service along with more specific pod information.
+    ```yaml
+    spec:
+      replicas: 2
+      selector: ...
+      ports: ...
+    ...
+    ```
+    
+* Status
+  - This part is automatically added by K8s and shouldn't be filled in by the user. This information is from etcd.
+  - Here K8s checks the desired state vs actual, allowing it to perform its self-healing capabilities.
+  
+These files should be stored alongside the application code, but can also have their own repository (containing all application K8s configs).
+
+##### Template
+This is used to give the pod's configuration within the deployment config and is located in the specification (spec) section.
+  ```yaml
+  spec:
+    replicas: ...
+    ...
+    template:           # start of pod config
+      metadata:         # -
+        ...             #  | Same structure as the deploy config
+      spec:             #  | (meta/spec/status). This is the pod's blueprint
+        containers:     # -
+  ```
+
+##### Connecting components
+To make sure that the deployment/service knows which pods are connected and how, labels are shared across the configuration  files. The labels are 'key:value' pairs.
+  ```yaml
+  # Deployment config
+  metadata:
+    ...
+    labels:
+      app: nginx # defining the label
+    ...
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: nginx # now the pods are linked by this deployment
+  --- # used to break up 2 files into one in yaml, usually done with linked deployment and service files as they depend on each other
+  # Service config
+  metadata:
+    name: ...
+  spec:
+    selector:
+      app: nginx # now the service knows which deployment it is linked to
+  ```
+
+##### Ports
+In the configuration a service has a port where it is accessible and a port for the container.
+  ```yaml
+  # nginx (external) service
+  ports:
+    protocol: TCP
+    port: 80 # service port
+    ...
+    targetPort: 8080 # container port (i.e multiple containers may look like: 172.168.1.2:8080, 172.168.1.3:8080, ..., etc)
+  ```
+In this way, the communication will look like this (given an app with a database service and an nginx server):
+  DB service -> (port 80) nginx service -> (port 8080) pod
+
+#### Namespaces
+These are used to organize K8s resources. You can have multiple namespaces in a cluster, like virtual clusters within one cluster.
+
+By default there are 4 namespaces:
+```bash 
+kubectl get namespace
+```
+* kubernetes-dashboard
+  - This ships with minikube.
+* kube-system
+  - Should not be touched, used for system processes.
+* kube-public
+  - Used for publically accessible data such as configMaps.
+* kube-node-lease
+  - Info about node's heartbeats
+  - Each node gets its own object containing info about that node's availibility.
+* default
+  - Use at the start to create resources.
+    
+##### Why Use Them?
+1. The more complex the app is, the more filled with resources the namespace becomes making it harder to manage and organize. Grouping related resources under a namespace is good practice. E.g 'database' for the database and its required resources, 'monitoring' or 'elasticstack' etc.
+2. If there are multiple teams involved within a single project, they may share resources with the same name. If this is inside the same namespace then there could be naming conflicts or even lost data. To avoid this each team can have their own namespace. They can have their access limited too to stop other teams editing their files accidentally.
+3. You could have 2+ versions of the same application, but want them to share certain resources.
+
+##### Limitations
+* You cannot share configMaps or secrets across namespaces, so multiple of the same file will need to be used. A service can be shared, however.
+* Volumes and nodes also cannot be namespaced.
+
+##### Useage
+Within the config file, values (from the key:value YAML format) should have the namespace appended to them (like class access in Java 'value.namespace').
+e.g. 
+```yaml
+data:
+  db_url: mysql_service.database
+#                      ---------
+```
+
+##### Default Namespace
+By default, components are created in a default NS.
 ```bash
-docker run -d -p hostport:containerport --net network-name
+kubectl get configmap -m default # use -n to choose ns
 ```
-Then to do any commands over the network, simply use user@name-of-container rather than user@<ip>.   
-For integrated containers, for example MongoDB has two containers, one for the actual database and the other for accessing it as a web application. Using the docker network and setting certain environment variables (things like username and port of the database) they can connect to eachother. The instructions for these things are found on the docker container image page, where a list of all needed environment variables are.   
 
-###### Docker compose
-This is used to orchestrate running containers at the same time rather than running individually on the command line.
-```
-# some-compose-file.yaml
-
-version:'3' # docker version
-services: # where container list goes
-    container1-name: # --name command from cli
-        image: # name of the image (local or dockerhub)
-
-        ports: # -p
-            - HOST:CONTAINER
-
-        environment: # -e
-            - ENV_VAR_1=val1
-
-    container2-name:
-        image:
-        ...
-    container3-name:
-        ...
-```
-A network is not needed to be manually created, docker does this automatically and puts all services/containers from within the compose file together in their own network.   
-
-The compose file must then be built and run using:
+You can specify the NS upon creation:
 ```bash
-docker-compose -f some-compose-file.yaml up # start all containers from this compose file
-docker-compose -f some-compose-file.yaml down # stop all containers from this compose file, also removes network
+kubectl apply -f <config-file-name> --namespace=<ns-name>
 ```
+Or within the config file (better):
+```bash
+metadata:
+  name: ...
+  namespace: my-namespace
+  ...
+```
+
+##### Changing Active Namespace
+Rather than calling all commands for a specific namespace with the '-n <ns-name>' appended to it, you can change the active workspace.
+kubectl does not handle this so an external tool kubens should be used.
+```bash
+kubens # list all NS'
+kubens <ns-name> # switch active NS
+```
+
+#### Ingress
+Is used instead of the external service "serviceIP:port" notation. Ingress changes this to an internal service to get "my-app.com" with added security.
+
+Browser -> ingress -> (internal) service -> pod
+
+##### Config File
+```yaml
+...
+  kind: Ingress
+  metadata: ...
+  ...
+  spec:
+    rules:
+      - host: myapp.com # must be valid URL and must map to the entrypoint, whether that be an internal node or external server
+      http: # only defining protocol, not linked to URL 'http://'
+        paths: # for the URI: 'myapp.com/<this bit>'
+        - backend:
+          serviceName: myapp-internal-service # this is what the specified URL (host: myapp.com) is routed to
+          servicePort: 8080
+...
+# This is not secure yet.
+```
+
+With Ingress, an ingress controller pod is used to interact with a cluster:
+ingress controller pod -> ingress -> service -> pod
+It checks all configs and rules, and manages all redirections. An example would be K8s Nginx ingress controller.
+
+##### Entrypoint
+When using a cloud provider with a build in load balancer, you can set it up to redirect to the ingress controller pod.
+On bare metal servers you need to set up a proxy server and set up an endpoint into the controller manually.
+
+Minikube can be used to setup an ingress controller:
+```bash
+minikube addons enable ingress
+```
+  
+##### Creating a namespace
+You can either define it by a command:
+```bash
+kubectl create namespace <ns-name>
+```
+Or add it into a configuration file.
 
 ### ssh
 
