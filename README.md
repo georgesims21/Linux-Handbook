@@ -365,10 +365,13 @@ services: # where container list goes
         image: # name of the image (local or dockerhub)
 
         ports: # -p
-            - HOST:CONTAINER
+            - "HOSTPORT:CONTAINERPORT"
 
         environment: # -e
             - ENV_VAR_1=val1
+        
+        volumes:
+            - hostvolume:containervolume
 
     container2-name:
         image:
