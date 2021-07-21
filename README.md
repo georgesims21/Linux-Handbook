@@ -601,6 +601,13 @@ kubectl get namespace
 2. If there are multiple teams involved within a single project, they may share resources with the same name. If this is inside the same namespace then there could be naming conflicts or even lost data. To avoid this each team can have their own namespace. They can have their access limited too to stop other teams editing their files accidentally.
 3. You could have 2+ versions of the same application, but want them to share certain resources.
 
+##### Creating a namespace
+You can either define it by a command:
+```bash
+kubectl create namespace <ns-name>
+```
+Or add it into a configuration file.
+
 ##### Limitations
 * You cannot share configMaps or secrets across namespaces, so multiple of the same file will need to be used. A service can be shared, however.
 * Volumes and nodes also cannot be namespaced.
@@ -675,13 +682,7 @@ Minikube can be used to setup an ingress controller:
 ```bash
 minikube addons enable ingress
 ```
-  
-##### Creating a namespace
-You can either define it by a command:
-```bash
-kubectl create namespace <ns-name>
-```
-Or add it into a configuration file.
+
 
 ### ssh
 
